@@ -330,6 +330,28 @@ export default function LogAnalysis() {
                       {log.rawLog}
                     </pre>
                   </div>
+
+                  {(log.mlLabel || log.mlConfidence) && (
+                    <div>
+                      <label className="block text-sm font-medium text-gray-300 mb-1">ML Prediction</label>
+                      <div className="bg-gray-700 p-3 rounded-lg text-sm text-white">
+                        <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+                          {log.mlLabel && (
+                            <div>
+                              <span className="text-gray-300">Label: </span>
+                              <span className="font-medium">{log.mlLabel}</span>
+                            </div>
+                          )}
+                          {typeof log.mlConfidence === 'number' && (
+                            <div>
+                              <span className="text-gray-300">Confidence: </span>
+                              <span className="font-medium">{(log.mlConfidence * 100).toFixed(2)}%</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
                   
                   {log.tags.length > 0 && (
                     <div>

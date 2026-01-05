@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { validateCredentials, getMockUserById } from '../utils/mockData';
+import { API_BASE_URL } from '../config';
 
 interface User {
   id: string;
@@ -18,58 +18,91 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+const AUTH_TOKEN_KEY = 'auth_token';
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Check for existing session
-    const mockToken = localStorage.getItem('mock_auth_token');
-    if (mockToken) {
-      // Validate mock token (just check if user exists)
-      const userData = getMockUserById(mockToken);
-      if (userData) {
+    // Restore session (JWT token) and validate it with the backend.
+    const token = localStorage.getItem(AUTH_TOKEN_KEY);
+    if (!token) {
+      setLoading(false);
+      return;
+    }
+
+    const validate = async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/auth/validate`, {
+          headers: {
+            Authorization: `Bearer ${token}`
+          }
+        });
+
+        if (!response.ok) {
+          localStorage.removeItem(AUTH_TOKEN_KEY);
+          setUser(null);
+          return;
+        }
+
+        const userData = await response.json();
         setUser({
-          id: userData.id,
+          id: String(userData.id),
           username: userData.username,
           email: userData.email,
           role: userData.role,
           permissions: userData.permissions
         });
-      } else {
-        localStorage.removeItem('mock_auth_token');
+      } catch (error) {
+        console.error('Session validation failed:', error);
+        // Keep token; user may be offline. They will be forced to login on API errors.
+        setUser(null);
+      } finally {
+        setLoading(false);
       }
-    }
-    setLoading(false);
+    };
+
+    validate();
   }, []);
 
   const login = async (username: string, password: string): Promise<boolean> => {
     try {
-      // Simulate network delay
-      await new Promise(resolve => setTimeout(resolve, 500));
-      
-      const userData = validateCredentials(username, password);
-      if (userData) {
-        // Store mock token (just the user ID)
-        localStorage.setItem('mock_auth_token', userData.id);
-        setUser({
-          id: userData.id,
-          username: userData.username,
-          email: userData.email,
-          role: userData.role,
-          permissions: userData.permissions
-        });
-        return true;
+      const response = await fetch(`${API_BASE_URL}/api/auth/login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ username, password })
+      });
+
+      if (!response.ok) {
+        return false;
       }
-      return false;
+
+      const data = await response.json();
+      if (!data?.token || !data?.user) {
+        return false;
+      }
+
+      localStorage.setItem(AUTH_TOKEN_KEY, data.token);
+      setUser({
+        id: String(data.user.id),
+        username: data.user.username,
+        email: data.user.email,
+        role: data.user.role,
+        permissions: data.user.permissions
+      });
+
+      return true;
     } catch (error) {
-      console.error('Mock login failed:', error);
+      console.error('Login failed:', error);
       return false;
     }
   };
 
   const logout = () => {
-    localStorage.removeItem('mock_auth_token');
+    localStorage.removeItem(AUTH_TOKEN_KEY);
     setUser(null);
   };
 

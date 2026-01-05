@@ -1,6 +1,8 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { useWebSocket } from './WebSocketContext';
 import { generateMockLogs } from '../utils/mockData';
+import { API_BASE_URL } from '../config';
+import { useAuth } from './AuthContext';
 
 export interface LogEntry {
   id: string;
@@ -19,6 +21,9 @@ export interface LogEntry {
   rawLog: string;
   threatLevel?: 'low' | 'medium' | 'high' | 'critical';
   mitreAttack?: string[];
+  mlLabel?: string | null;
+  mlConfidence?: number | null;
+  mlModel?: string | null;
 }
 
 export interface LogFilter {
@@ -51,6 +56,7 @@ export function LogProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [totalCount, setTotalCount] = useState(0);
   const { socket } = useWebSocket();
+  const { user } = useAuth();
 
   const [filters, setFilters] = useState<LogFilter>({
     dateRange: {
@@ -67,8 +73,16 @@ export function LogProvider({ children }: { children: React.ReactNode }) {
   );
 
   useEffect(() => {
+    if (!user) {
+      setLogs([]);
+      setFilteredLogs([]);
+      setTotalCount(0);
+      setLoading(false);
+      return;
+    }
+
     fetchLogs();
-  }, []);
+  }, [user]);
 
   useEffect(() => {
     if (socket && socket.onmessage) {
@@ -96,19 +110,35 @@ export function LogProvider({ children }: { children: React.ReactNode }) {
   const fetchLogs = async () => {
     try {
       setLoading(true);
-      
-      // Simulate network delay
-      await new Promise(resolve => setTimeout(resolve, 800));
-      
-      // Generate mock logs
+
+      const token = localStorage.getItem('auth_token');
+      if (!token) {
+        throw new Error('Missing auth token');
+      }
+
+      const response = await fetch(`${API_BASE_URL}/api/logs?limit=1000&offset=0`, {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch logs (${response.status})`);
+      }
+
+      const data = await response.json();
+      const apiLogs = (data.logs || []).map((log: any) => ({
+        ...log,
+        timestamp: new Date(log.timestamp)
+      })) as LogEntry[];
+
+      setLogs(apiLogs);
+      setTotalCount(Number(data.total ?? apiLogs.length));
+    } catch (error) {
+      console.error('Failed to fetch logs from API, falling back to mock logs:', error);
       const mockLogs = generateMockLogs(150);
-      
       setLogs(mockLogs);
       setTotalCount(mockLogs.length);
-      
-      console.log(`✅ Loaded ${mockLogs.length} mock logs`);
-    } catch (error) {
-      console.error('Failed to fetch mock logs:', error);
     } finally {
       setLoading(false);
     }

@@ -160,6 +160,36 @@ cybersecurity-log-analysis-platform/
 - **Password:** password
 - **Role:** Administrator (full access)
 
+## 🤖 ML Model Integration (CICIDS)
+
+Your notebooks already train and export scikit-learn models:
+- Binary: `random_forest_cicids.pkl` + `scaler_cicids.pkl`
+- Multiclass: `rf_multiclass_cicids.pkl` + `scaler_multiclass_cicids.pkl` + `label_encoder_cicids.pkl`
+
+This repo now includes a small inference API in [ml_service/README.md](ml_service/README.md).
+
+### Run the ML service
+
+From `cybersecurity-log-analysis-platform/`:
+
+- `python -m venv .venv`
+- `./.venv/Scripts/pip install -r ml_service/requirements.txt`
+- `./.venv/Scripts/python -m uvicorn ml_service.app:app --host 0.0.0.0 --port 8000`
+
+### Backend endpoints
+
+- `GET /api/ml/health` (requires login/JWT)
+- `POST /api/ml/predict` (requires login/JWT)
+
+Set `ML_SERVICE_URL` if your ML service runs elsewhere (default `http://localhost:8000`).
+
+### Using ML during log ingest
+
+`POST /api/logs/ingest` can optionally include `mlFeatures` (a CICIDS feature dictionary). If provided and the ML service is running, the backend will:
+- call the ML service
+- store multiclass prediction in `threat_intelligence`
+- ensure `threatLevel` is at least `medium` if binary predicts `ATTACK`
+
 ## 🔧 Configuration
 
 ### Environment Variables
@@ -229,6 +259,10 @@ npm run server # Start backend
 npm run build  # Build frontend for production
 npm run preview # Preview production build
 ```
+
+### Cloud deployment (recommended)
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for Docker + VPS instructions (HTTPS + persistent database).
 
 ## 🤝 Contributing
 

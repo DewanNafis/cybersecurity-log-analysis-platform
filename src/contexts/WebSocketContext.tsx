@@ -1,79 +1,53 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { generateRealTimeLogEntry } from '../utils/mockData';
-
-interface MockSocket {
-  onmessage: ((event: { data: string }) => void) | null;
-}
+import { WS_BASE_URL } from '../config';
+import { useAuth } from './AuthContext';
 
 interface WebSocketContextType {
-  socket: MockSocket | null;
+  socket: WebSocket | null;
   connected: boolean;
 }
 
 const WebSocketContext = createContext<WebSocketContextType | undefined>(undefined);
 
 export function WebSocketProvider({ children }: { children: React.ReactNode }) {
-  const [socket, setSocket] = useState<MockSocket | null>(null);
+  const [socket, setSocket] = useState<WebSocket | null>(null);
   const [connected, setConnected] = useState(false);
+  const { user } = useAuth();
 
   useEffect(() => {
-    // Only connect if user is authenticated
-    const token = localStorage.getItem('mock_auth_token');
-    if (!token) {
-      console.log('No auth token, skipping mock WebSocket connection');
+    if (!user) {
+      // Ensure connection is closed when user logs out.
+      if (socket) {
+        socket.close();
+      }
+      setSocket(null);
+      setConnected(false);
       return;
     }
 
-    console.log('✅ Mock WebSocket connected successfully');
-    
-    // Create mock socket
-    const mockSocket: MockSocket = {
-      onmessage: null
+    const ws = new WebSocket(WS_BASE_URL);
+    setSocket(ws);
+
+    ws.onopen = () => {
+      setConnected(true);
+      console.log('✅ WebSocket connected');
     };
-    
-    setSocket(mockSocket);
-    setConnected(true);
 
-    // Simulate real-time log updates
-    const interval = setInterval(() => {
-      if (mockSocket.onmessage) {
-        // Generate new log entry
-        const newLog = generateRealTimeLogEntry();
-        
-        // Send new log event
-        mockSocket.onmessage({
-          data: JSON.stringify({
-            type: 'new_log',
-            log: newLog,
-            timestamp: new Date().toISOString()
-          })
-        });
+    ws.onclose = () => {
+      setConnected(false);
+      console.log('🔌 WebSocket disconnected');
+    };
 
-        // If it's a threat, also send threat detection event
-        if (newLog.threatLevel && ['medium', 'high', 'critical'].includes(newLog.threatLevel)) {
-          setTimeout(() => {
-            if (mockSocket.onmessage) {
-              mockSocket.onmessage({
-                data: JSON.stringify({
-                  type: 'threat_detected',
-                  threat: newLog,
-                  timestamp: new Date().toISOString()
-                })
-              });
-            }
-          }, 100);
-        }
-      }
-    }, 3000 + Math.random() * 5000); // Random interval between 3-8 seconds
+    ws.onerror = (err) => {
+      console.error('❌ WebSocket error:', err);
+    };
 
-    // Cleanup
     return () => {
-      clearInterval(interval);
+      ws.close();
       setConnected(false);
       setSocket(null);
-      console.log('🔌 Mock WebSocket disconnected');
     };
-  }, []);
+  }, [user]);
 
   return (
     <WebSocketContext.Provider value={{ socket, connected }}>

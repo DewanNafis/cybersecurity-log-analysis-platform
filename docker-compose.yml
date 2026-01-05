@@ -1,0 +1,30 @@
+services:
+  ml:
+    build:
+      context: .
+      dockerfile: ml_service/Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./ml_service/models:/app/ml_service/models:ro
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - ml
+    environment:
+      # Point Node to the ML service by container name
+      ML_SERVICE_URL: http://ml:8000
+      # Set these in your cloud environment for security
+      JWT_SECRET: change-me
+      DEFAULT_ADMIN_PASSWORD: change-me
+      PORT: 3001
+    ports:
+      - "3001:3001"
+    volumes:
+      # Persist SQLite database
+      - ./cybersecurity.db:/app/cybersecurity.db
+    restart: unless-stopped

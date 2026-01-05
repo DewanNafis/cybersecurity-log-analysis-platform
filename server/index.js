@@ -22,9 +22,12 @@ const wss = new WebSocketServer({
   noServer: true // Changed to noServer to handle upgrade manually
 });
 
-// Database setup using libsql (compatible with WebContainer)
+// Database setup using libsql.
+// - Default: local SQLite file `cybersecurity.db`
+// - Cloud: set DATABASE_URL (+ DATABASE_AUTH_TOKEN if required)
 const db = createClient({
-  url: 'file:cybersecurity.db'
+  url: process.env.DATABASE_URL || 'file:cybersecurity.db',
+  authToken: process.env.DATABASE_AUTH_TOKEN
 });
 
 // Initialize database tables
@@ -58,9 +61,25 @@ await db.execute(`
     raw_log TEXT NOT NULL,
     threat_level TEXT,
     mitre_attack TEXT,
+    ml_label TEXT,
+    ml_confidence REAL,
+    ml_model TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )
 `);
+
+// Lightweight migration for existing DBs
+async function tryAddColumn(sql) {
+  try {
+    await db.execute(sql);
+  } catch {
+    // Ignore if column already exists
+  }
+}
+
+await tryAddColumn('ALTER TABLE logs ADD COLUMN ml_label TEXT');
+await tryAddColumn('ALTER TABLE logs ADD COLUMN ml_confidence REAL');
+await tryAddColumn('ALTER TABLE logs ADD COLUMN ml_model TEXT');
 
 await db.execute(`
   CREATE TABLE IF NOT EXISTS threat_intelligence (
@@ -85,41 +104,25 @@ await db.execute(`
 
 // Create default admin user if not exists
 try {
-  // First, clear any existing admin user to ensure clean state
-  await db.execute({
-    sql: 'DELETE FROM users WHERE username = ?',
+  const existingAdmin = await db.execute({
+    sql: 'SELECT id, username FROM users WHERE username = ?',
     args: ['admin']
   });
-  
-  // Create fresh admin user with known password
-  const hashedPassword = bcrypt.hashSync('password', 10);
-  const result = await db.execute({
-    sql: `INSERT INTO users (username, email, password, role) VALUES (?, ?, ?, ?)`,
-    args: ['admin', 'admin@company.com', hashedPassword, 'admin']
-  });
-  
-  console.log('✅ Default admin user created successfully');
-  console.log('   Username: admin');
-  console.log('   Password: password');
-  console.log('   User ID:', result.lastInsertRowid);
-  
-  // Verify the user was created
-  const createdUser = await db.execute({
-    sql: 'SELECT * FROM users WHERE username = ?',
-    args: ['admin']
-  });
-  
-  if (createdUser.rows.length > 0) {
-    const user = createdUser.rows[0];
-    console.log('✅ User verification:', {
-      id: user.id,
-      username: user.username,
-      email: user.email,
-      role: user.role,
-      hasPassword: !!user.password
+
+  if (existingAdmin.rows.length === 0) {
+    const adminPassword = process.env.DEFAULT_ADMIN_PASSWORD || 'password';
+    const hashedPassword = bcrypt.hashSync(adminPassword, 10);
+
+    const result = await db.execute({
+      sql: 'INSERT INTO users (username, email, password, role) VALUES (?, ?, ?, ?)',
+      args: ['admin', 'admin@company.com', hashedPassword, 'admin']
     });
+
+    console.log('✅ Default admin user created');
+    console.log('   Username: admin');
+    console.log(`   Password: ${adminPassword}`);
+    console.log('   User ID:', result.lastInsertRowid);
   }
-  
 } catch (error) {
   console.error('❌ Error creating admin user:', error);
 }
@@ -143,6 +146,10 @@ const limiter = rateLimit({
 });
 
 const JWT_SECRET = process.env.JWT_SECRET || 'cybersecurity-platform-secret-key-2024';
+
+// Optional ML inference service (FastAPI) used for CICIDS models
+// See: cybersecurity-log-analysis-platform/ml_service/README.md
+const ML_SERVICE_URL = process.env.ML_SERVICE_URL || 'http://localhost:8000';
 
 // Authentication middleware
 const authenticateToken = (req, res, next) => {
@@ -313,7 +320,10 @@ apiRouter.get('/logs', authenticateToken, async (req, res) => {
       tags: log.tags ? JSON.parse(log.tags) : [],
       rawLog: log.raw_log,
       threatLevel: log.threat_level,
-      mitreAttack: log.mitre_attack ? JSON.parse(log.mitre_attack) : []
+      mitreAttack: log.mitre_attack ? JSON.parse(log.mitre_attack) : [],
+      mlLabel: log.ml_label,
+      mlConfidence: log.ml_confidence,
+      mlModel: log.ml_model
     }));
 
     console.log(`✅ Returning ${formattedLogs.length} logs out of ${total} total`);
@@ -327,6 +337,68 @@ apiRouter.get('/logs', authenticateToken, async (req, res) => {
   }
 });
 
+async function callMlService(payload) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3000);
+
+  try {
+    const response = await fetch(`${ML_SERVICE_URL}/predict`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+
+    const data = await response.json().catch(() => null);
+
+    if (!response.ok) {
+      const detail = data?.detail || data || { error: 'ML service error' };
+      throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+    }
+
+    return data;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+apiRouter.get('/ml/health', authenticateToken, async (req, res) => {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2000);
+
+    const response = await fetch(`${ML_SERVICE_URL}/health`, { signal: controller.signal });
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      return res.status(502).json({ ok: false, error: 'ML service unhealthy', status: response.status, mlServiceUrl: ML_SERVICE_URL });
+    }
+
+    const data = await response.json();
+    return res.json({ ok: true, ml: data, mlServiceUrl: ML_SERVICE_URL });
+  } catch (error) {
+    return res.status(502).json({ ok: false, error: 'ML service not reachable', mlServiceUrl: ML_SERVICE_URL });
+  }
+});
+
+// Direct prediction endpoint (expects CICIDS feature dict)
+apiRouter.post('/ml/predict', authenticateToken, async (req, res) => {
+  try {
+    const { mode = 'both', features } = req.body || {};
+    if (!features || typeof features !== 'object') {
+      return res.status(400).json({ error: 'Missing "features" object in request body' });
+    }
+
+    const result = await callMlService({ mode, features });
+    return res.json(result);
+  } catch (error) {
+    console.error('ML predict error:', error);
+    return res.status(502).json({ error: 'Failed to get prediction from ML service' });
+  }
+});
+
 apiRouter.post('/logs/ingest', authenticateToken, async (req, res) => {
   try {
     const logEntry = req.body;
@@ -334,9 +406,33 @@ apiRouter.post('/logs/ingest', authenticateToken, async (req, res) => {
     // Generate unique ID
     const id = generateLogId();
     
-    // Analyze log for threats using AI (simulated)
-    const threatAnalysis = analyzeLogForThreats(logEntry);
+    // Analyze log for threats.
+    // If the client provides CICIDS-style numeric features, prefer the ML model.
+    let threatAnalysis = analyzeLogForThreats(logEntry);
+    let mlResult = null;
+
+    if (logEntry?.mlFeatures && typeof logEntry.mlFeatures === 'object') {
+      try {
+        mlResult = await callMlService({ mode: 'both', features: logEntry.mlFeatures });
+
+        // Minimal mapping from ML output to the existing UI fields.
+        // If binary model says ATTACK, ensure at least "medium".
+        if (mlResult?.binary?.label === 'ATTACK' && !threatAnalysis.threatLevel) {
+          threatAnalysis = { threatLevel: 'medium', mitreAttack: [] };
+        }
+      } catch (e) {
+        console.warn('ML service unavailable; using rule-based analysis');
+      }
+    }
     
+    const mlLabel = mlResult?.multiclass?.label || mlResult?.binary?.label || null;
+    const mlConfidence = (
+      (typeof mlResult?.multiclass?.confidence === 'number' && mlResult.multiclass.confidence) ||
+      (typeof mlResult?.binary?.confidence === 'number' && mlResult.binary.confidence) ||
+      null
+    );
+    const mlModel = mlResult ? 'cicids' : null;
+
     // Insert log into database
     await db.execute({
       sql: `
@@ -344,7 +440,8 @@ apiRouter.post('/logs/ingest', authenticateToken, async (req, res) => {
           id, timestamp, level, source, destination, message,
           source_ip, destination_ip, port, protocol, event_type,
           severity, tags, raw_log, threat_level, mitre_attack
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          , ml_label, ml_confidence, ml_model
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       args: [
         id,
@@ -362,9 +459,30 @@ apiRouter.post('/logs/ingest', authenticateToken, async (req, res) => {
         JSON.stringify(logEntry.tags || []),
         logEntry.rawLog || logEntry.message,
         threatAnalysis.threatLevel,
-        JSON.stringify(threatAnalysis.mitreAttack || [])
+        JSON.stringify(threatAnalysis.mitreAttack || []),
+        mlLabel,
+        mlConfidence,
+        mlModel
       ]
     });
+
+    // Store ML result (if any) into threat_intelligence for later reporting
+    if (mlResult?.multiclass?.label) {
+      try {
+        await db.execute({
+          sql: 'INSERT INTO threat_intelligence (log_id, threat_type, confidence, description, recommendations) VALUES (?, ?, ?, ?, ?)',
+          args: [
+            id,
+            String(mlResult.multiclass.label),
+            Number(mlResult.multiclass.confidence || 0),
+            'ML prediction (CICIDS multiclass model)',
+            'Investigate the affected host/flow and validate with other telemetry.'
+          ]
+        });
+      } catch (e) {
+        console.warn('Failed to store ML threat_intelligence:', e);
+      }
+    }
 
     // Broadcast to connected clients
     const formattedLog = {
@@ -380,7 +498,10 @@ apiRouter.post('/logs/ingest', authenticateToken, async (req, res) => {
       tags: logEntry.tags || [],
       rawLog: logEntry.rawLog || logEntry.message,
       threatLevel: threatAnalysis.threatLevel,
-      mitreAttack: threatAnalysis.mitreAttack || []
+      mitreAttack: threatAnalysis.mitreAttack || [],
+      mlLabel,
+      mlConfidence,
+      mlModel
     };
 
     broadcast({
