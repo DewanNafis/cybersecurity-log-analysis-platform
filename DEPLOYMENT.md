@@ -100,6 +100,24 @@ Then add TLS via Certbot.
   - attach persistent volumes for `cybersecurity.db`
   - deploy ML service as a second container/service
 
+### Render UI note: there is no “Dockerfile path” field
+
+Render does not let you browse to an arbitrary Dockerfile path in the UI.
+Instead, Render builds the `Dockerfile` that lives in the service’s **Root Directory**.
+
+For this repo structure:
+- **ML service**
+  - Environment: **Docker**
+  - Root Directory: `cybersecurity-log-analysis-platform/ml_service`
+  - Dockerfile must be named exactly `Dockerfile` inside that folder (this repo already has `ml_service/Dockerfile`).
+
+- **Web service (Node + React)**
+  - Environment: **Docker**
+  - Root Directory: `cybersecurity-log-analysis-platform`
+  - Dockerfile must be named exactly `Dockerfile` inside that folder (this repo already has one at the platform root).
+
+If you ever need a non-standard Dockerfile name/location, the usual approach on Render is using a `render.yaml` Blueprint (which can specify `dockerfilePath`), or restructuring so each service’s Dockerfile is at the root of its Root Directory.
+
 ## 5) Security minimums
 
 Before demoing publicly:

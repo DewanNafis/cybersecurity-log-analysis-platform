@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional, Tuple
 from urllib.request import urlopen
+import shutil
 
 import joblib
 import numpy as np
@@ -66,10 +67,20 @@ def _download_if_missing(dest: Path, url: Optional[str]) -> None:
         return
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    # Simple download helper (keeps dependencies minimal for Render)
-    with urlopen(url, timeout=30) as r:
-        data = r.read()
-    dest.write_bytes(data)
+    timeout_s = int(os.environ.get("ML_DOWNLOAD_TIMEOUT_SECONDS", "300"))
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    try:
+        # Stream to disk to avoid holding large .pkl files in memory.
+        with urlopen(url, timeout=timeout_s) as r, tmp.open("wb") as f:
+            shutil.copyfileobj(r, f, length=1024 * 1024)
+        tmp.replace(dest)
+    except Exception as e:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
+        raise RuntimeError(f"Failed to download {dest.name} from {url}: {e}")
 
 
 def _vectorize(features: Dict[str, float], feature_columns: list[str]) -> pd.DataFrame:
@@ -113,6 +124,15 @@ _multi_le = None
 _feature_columns = None
 
 
+def _file_info(path: Path) -> Dict[str, Any]:
+    try:
+        exists = path.exists()
+        size = path.stat().st_size if exists else None
+        return {"path": str(path), "exists": exists, "size_bytes": size}
+    except Exception as e:
+        return {"path": str(path), "exists": False, "error": str(e)}
+
+
 def _ensure_loaded() -> None:
     global _binary_model, _binary_scaler, _multi_model, _multi_scaler, _multi_le, _feature_columns
 
@@ -143,18 +163,45 @@ def _ensure_loaded() -> None:
 
 @app.get("/health")
 def health() -> Dict[str, Any]:
-    _ensure_loaded()
-    return {
-        "status": "ok",
+    from fastapi.responses import JSONResponse
+
+    load_error: Optional[str] = None
+    try:
+        _ensure_loaded()
+    except Exception as e:
+        load_error = str(e)
+
+    ok = load_error is None
+    content: Dict[str, Any] = {
+        "status": "ok" if ok else "error",
+        "error": load_error,
         "models_dir": str(MODELS_DIR),
+        "download_timeout_seconds": int(os.environ.get("ML_DOWNLOAD_TIMEOUT_SECONDS", "300")),
+        "artifacts": {
+            "binary_model": _file_info(BINARY_MODEL_PATH),
+            "binary_scaler": _file_info(BINARY_SCALER_PATH),
+            "multiclass_model": _file_info(MULTI_MODEL_PATH),
+            "multiclass_scaler": _file_info(MULTI_SCALER_PATH),
+            "label_encoder": _file_info(MULTI_LABEL_ENCODER_PATH),
+            "feature_columns": _file_info(FEATURE_COLUMNS_PATH),
+        },
+        "env_urls_set": {
+            "ML_BINARY_MODEL_URL": bool(ML_BINARY_MODEL_URL),
+            "ML_BINARY_SCALER_URL": bool(ML_BINARY_SCALER_URL),
+            "ML_MULTI_MODEL_URL": bool(ML_MULTI_MODEL_URL),
+            "ML_MULTI_SCALER_URL": bool(ML_MULTI_SCALER_URL),
+            "ML_MULTI_LABEL_ENCODER_URL": bool(ML_MULTI_LABEL_ENCODER_URL),
+            "ML_FEATURE_COLUMNS_URL": bool(ML_FEATURE_COLUMNS_URL),
+        },
         "binary_model_loaded": _binary_model is not None,
         "binary_scaler_loaded": _binary_scaler is not None,
         "multiclass_model_loaded": _multi_model is not None,
         "multiclass_scaler_loaded": _multi_scaler is not None,
         "label_encoder_loaded": _multi_le is not None,
         "feature_columns_known": _feature_columns is not None,
-        "feature_columns_path": str(FEATURE_COLUMNS_PATH),
     }
+
+    return JSONResponse(status_code=200 if ok else 503, content=content)
 
 
 @app.post("/predict", response_model=PredictResponse)
