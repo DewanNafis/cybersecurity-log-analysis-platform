@@ -44,6 +44,11 @@ From `cybersecurity-log-analysis-platform/`:
 
 Health check: `http://localhost:8000/health`
 
+### Render note (Bad Gateway / 502)
+
+Render sets a `PORT` environment variable and expects the container to listen on that port.
+If the service is bound to a different port, Render will show **Bad Gateway** even if your code is correct.
+
 ## 3) API
 
 - `POST /predict` accepts:

@@ -15,4 +15,5 @@ COPY ml_service /app/ml_service
 ENV ML_MODELS_DIR=/app/ml_service/models
 
 EXPOSE 8000
-CMD ["python", "-m", "uvicorn", "ml_service.app:app", "--host", "0.0.0.0", "--port", "8000"]
+# Render sets $PORT; default to 8000 for local runs.
+CMD ["sh", "-c", "python -m uvicorn ml_service.app:app --host 0.0.0.0 --port ${PORT:-8000}"]

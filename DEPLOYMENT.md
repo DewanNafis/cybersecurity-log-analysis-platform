@@ -110,6 +110,7 @@ For this repo structure:
   - Environment: **Docker**
   - Root Directory: `cybersecurity-log-analysis-platform/ml_service`
   - Dockerfile must be named exactly `Dockerfile` inside that folder (this repo already has `ml_service/Dockerfile`).
+  - Note: Render injects a `PORT` env var; the container must listen on it.
 
 - **Web service (Node + React)**
   - Environment: **Docker**
